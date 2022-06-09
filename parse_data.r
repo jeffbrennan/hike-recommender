@@ -2,31 +2,224 @@ library(tidyverse)
 library(data.table)
 library(jsonlite)
 library(glue)
+library(sf)
+library(ggpubr)
 
-# pull data -----------------------------------------------------------------------------------
+library(sp)
+library(rgdal)
+library(geosphere)
+
+# extract relevant data from nested list cols and flatten
 Get_Data = function(fname) { 
   result = fromJSON(fname)[['hits']] |>
     group_by(row_number()) |> 
     mutate(backpacking = 'backpacking' %in% unlist(activities)) |> 
     mutate(camping = 'camping' %in% unlist(activities)) |> 
-    mutate(water_stuff = str_detect(activities |> paste0(), 'sea-kayaking|kayaking|paddle-sports|canoeing')) |>
+    mutate(water_stuff = str_detect(paste0(activities), 'sea-kayaking|kayaking|paddle-sports|canoeing')) |>
     mutate(lat = `_geoloc`[[1]]) |> 
     mutate(long = `_geoloc`[[2]]) |> 
+    ungroup() |> 
     select(-activities, -`_geoloc`)
   return(result)
 }
 
+# https://stackoverflow.com/questions/32100133/print-the-time-a-script-has-been-running-in-r
+hms_span = function(start, end) {
+  dsec = as.numeric(difftime(end, start, unit = "secs"))
+  hours = floor(dsec / 3600)
+  minutes = floor((dsec - 3600 * hours) / 60)
+  seconds = dsec - 3600*hours - 60*minutes
+  paste0(
+    sapply(c(hours, minutes, seconds), function(x) {
+      formatC(x, width = 2, format = "d", flag = "0")
+    }), collapse = ":")
+}
 
-all_states = list.files('results/', full.names = TRUE) %>% 
+
+
+Calc_Distance = function(lon, lat, id=NA) {
+  if (length(id) == 1) {id = rep('1', times = length(lon))}
+  
+  result = tryCatch(
+    {
+      xy = SpatialPointsDataFrame(
+        matrix(c(lon, lat), ncol=2),
+        data.frame(ID = id),
+        proj4string=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+      
+      # implement with data table
+      distance_matrix = distm(xy) |> 
+        as.data.frame() |> 
+        mutate(across(everything(), ~ ./ 1609)) |> 
+        as.matrix()
+      
+      if (nrow(distance_matrix) == 2) {
+        as.vector(distance_matrix[2,1])
+      } else {
+        list('xy' = xy,
+             'distance_matrix' = distance_matrix)  
+      }
+    },
+    error=function(cond) {
+      return(NA)
+    }
+  )  
+  return(result)
+}
+
+
+# TODO: consider multicore processing with one matrix per contiguous region if decide to add more states
+# 7836 trails -> 61 mil dist values 
+# Cluster trails by creating nxn matrix of distances in miles
+
+# TODO: if number of trails in cluster below specified threshold, add members to nearest cluster
+Get_Clusters = function(lon, lat, id, cluster_distance) {
+  results = Calc_Distance(lon, lat, id)
+  clusters = hclust(as.dist(results[['distance_matrix']]), method="complete")
+  
+  results[['xy']][['clust']] = cutree(clusters, h = cluster_distance)
+  cluster_results = results[['xy']]@'data'
+  
+  avg_trail_cluster = cluster_results |>
+    group_by(clust) |>
+    summarize(n = n()) |>
+    pull(n) |>
+    mean()
+  
+  message('Average trails per cluster: ', round(avg_trail_cluster, 2))
+  return(cluster_results)
+}
+
+# cleaning ------------------------------------------------------------------------------------
+## pull data ----------------------------------------------------------------------------------------
+
+all_states = list.files('trails/', full.names = TRUE) %>% 
   .[str_detect(., '\\.json')]
 
-all_trails = map(all_states, Get_Data) |> rbindlist(fill = TRUE)
+all_trails_raw = map(all_states, Get_Data) |> rbindlist(fill = TRUE)
 
-# remove nonstarters --------------------------------------------------------------------------
+## clusters ------------------------------------------------------------------------------------
+# obtain clusters of hikes in 25 mile radius
+message('Obtaining hike clusters...')
+start = Sys.time()
+hike_clusters = Get_Clusters(all_trails_raw$long,
+                             all_trails_raw$lat,
+                             all_trails_raw$ID,
+                             cluster_distance = 25)
+message('Time elapsed: ', hms_span(start, Sys.time()))
+
+## geometry ------------------------------------------------------------------------------------
+all_trails_sf =  st_as_sf(all_trails, coords = c('long', 'lat'), crs = 4326) |> 
+  select(ID, geometry)
+
+
+## distance from apt ---------------------------------------------------------------------------
+home_address = fread('backend/home.csv')
+
+# dplyr 26 seconds
+start_time = Sys.time()
+home_distance = all_trails_raw |> 
+  select(ID, lat, long) |> 
+  group_by(row_number()) |> 
+  mutate(home_distance = Calc_Distance(c(lat, home_address[['lat']]),
+                                       c(long, home_address[['lon']]))
+  ) |> 
+  ungroup() |> 
+  select(-`row_number()`)
+message('Time elapsed: ', hms_span(start_time, Sys.time()))
+
+## combine -------------------------------------------------------------------------------------
+all_trails = all_trails_sf |> 
+  left_join(all_trails_raw, by = 'ID') |> 
+  left_join(hike_clusters |> rename(distance_cluster = clust),
+            by = 'ID') |> 
+  left_join(home_distance |> select(ID, home_distance), by = 'ID') |>
+  mutate(avg_grade = (elevation_gain / length) * 100) |>
+  mutate(length = length / 1609) |> 
+  mutate(elevation_gain = elevation_gain * 3.281) |> 
+  mutate(difficulty_rating = factor(difficulty_rating, labels = c('easy', 'med', 'hard', '💀')))
+
+
+# maps -----------------------------------------------------------------------------------------
+states = map_data('state')
 
 
 
+## all trails ----------------------------------------------------------------------------------
+# TODO: add florida, CT, RI, oregon
+all_trails |> 
+ggplot() + 
+  geom_polygon( data=states, aes(x=long, y=lat, group=group),
+                color="black", fill="gray95" ) + 
+geom_sf(color = 'dodgerblue') + 
+theme_void()
 
-# identify clusters for daytrips based on lat long  -------------------------------------------
 
+## cluster testing --------------------------------------------------------------------------------
+all_trails |> 
+  filter(state_name == 'New York') |>
+  filter(home_distance < 25) |> 
+  group_by(distance_cluster) |>
+  filter(n() > 5) |> 
+  mutate(distance_cluster = cur_group_id()) |> 
+  ungroup() |> 
+  mutate(distance_cluster = as.character(distance_cluster)) |>
+  mutate(distance_cluster = str_pad(distance_cluster, width = 3, pad = '0')) |> 
+  select(geometry, distance_cluster) |> 
+  ggplot() + 
+  geom_polygon(data = states |> filter(region == 'new york'), aes(x=long, y=lat, group=group),
+                color = "black", fill="gray95") + 
+  geom_sf(aes(color = distance_cluster)) + 
+  theme_void()
+
+# exploration ---------------------------------------------------------------------------------
+
+# elevation & length
+all_trails |>
+  filter(duration_minutes_hiking < 600) |>
+  ggplot(aes(x = length, y = elevation_gain)) + 
+  geom_point(aes(color = difficulty_rating)) + 
+  labs(y = 'elevation gain (feet)',
+       x = 'length (mi)') +
+  facet_wrap(~state_name) +
+  theme_pubr()
+
+ggsave(filename = 'viz/scatter_elevation_length.png', width = 9, height = 9, dpi = 600)
+
+# compare difficulty by state
+all_trails |>
+  filter(duration_minutes_hiking < 600) |>
+  mutate(difficulty_rating = factor(difficulty_rating, labels = c('easy', 'med', 'hard', '💀'))) |> 
+  ggplot(aes(x = avg_grade, y = state_name)) + 
+  geom_boxplot(aes(fill = difficulty_rating)) + 
+  facet_wrap(~difficulty_rating, ncol = 1) +
+  labs(y = '') +
+  theme_pubr() + 
+  theme(legend.position = 'none')
+
+ggsave(filename = 'viz/box_difficulty_grade.png', width = 6, height = 12, dpi = 600)
+
+all_trails |> 
+  select(avg_grade, length, elevation_gain, duration_minutes_hiking, state_name) |>
+  filter(length < 20) |> 
+  st_drop_geometry() |> 
+  pivot_longer(!state_name) |> 
+  ggplot(aes(x = value, y = state_name)) + 
+  geom_boxplot(aes(fill = name)) + 
+  facet_wrap(~name, ncol = 1, scales = 'free') +
+  labs(x = '', y = '') +
+  theme_pubr() + 
+  theme(legend.position = 'none')
+
+ggsave(filename = 'viz/box_trail_features.png', width = 6, height = 12, dpi = 600)
+
+# recommendation weighting -----------------------------------------------------------------------
+# weighted component based on 
+# 1 - popularity or num reviews (test this)
+# 2 - time to complete
+# 3 - avg grade
+
+
+# in shiny app, given number of days & max hiking time, filter and recommend top suggestions
+# visualize selections against other hikes in the same area with scatter plot of elevation and length
 
