@@ -47,7 +47,8 @@ Calc_Distance = function(lon, lat, id=NA) {
         data.frame(ID = id),
         proj4string=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
       
-      # implement with data table
+
+      message('Generating ', length(lon), 'x', length(lon), ' distance matrix...\n')
       distance_matrix = distm(xy) |> 
         as.data.frame() |> 
         mutate(across(everything(), ~ ./ 1609)) |> 
@@ -71,15 +72,92 @@ Calc_Distance = function(lon, lat, id=NA) {
 # TODO: consider multicore processing with one matrix per contiguous region if decide to add more states
 # 7836 trails -> 61 mil dist values 
 # Cluster trails by creating nxn matrix of distances in miles
+Minimize_Clusters = function(initial_cluster, cluster_locations_nearest, min_trail = 5) { 
 
-# TODO: if number of trails in cluster below specified threshold, add members to nearest cluster
-Get_Clusters = function(lon, lat, id, cluster_distance) {
+    minimized_clusters_raw = initial_cluster |> 
+    left_join(cluster_locations_nearest |> select(clust, nearest_distance, nearest_cluster), by = 'clust') |> 
+    group_by(clust) |> 
+    mutate(below_threshold = n() < 5) |> 
+    ungroup()
+  
+  minimized_clusters_below = minimized_clusters_raw |> 
+    filter(below_threshold) |> 
+    arrange(clust) |> 
+    mutate(clust_appearance = map(nearest_cluster, ~which(clust == .)[1])) |> 
+    mutate(clust = ifelse(row_number() > clust_appearance | is.na(clust_appearance), nearest_cluster, clust))
+  
+  minimized_clusters = minimized_clusters_raw |> 
+    filter(!below_threshold) |> 
+    plyr::rbind.fill(minimized_clusters_below) |>
+    arrange(clust) |> 
+    group_by(clust) |> 
+    mutate(clust = cur_group_id()) |> 
+    ungroup() |> 
+    select(-nearest_distance, -nearest_cluster, -clust_appearance, -below_threshold)
+  
+  stray_trails = minimized_clusters |>
+    group_by(clust) |>
+    filter(n() < min_trail) |> 
+    ungroup() 
+  
+  return(list('clust_df' = minimized_clusters,
+              'stray_trails' = stray_trails))
+}
+
+
+Calc_Distance_Cluster = function(geo_df, cluster_results) { 
+  cluster_locations = geo_df |>
+    left_join(cluster_results, by = c('id' ='ID')) |> 
+    group_by(clust) |> 
+    summarize(across(c(lon, lat), median)) |> 
+    ungroup()
+  
+  cluster_distm = Calc_Distance(cluster_locations$lon,
+                                cluster_locations$lat,
+                                id=cluster_locations$clust)[['distance_matrix']]
+  
+  cluster_locations_nearest = cluster_locations |> 
+    group_by(clust) |>
+    mutate(nearest_distance = sort(cluster_distm[, clust])[2]) |> 
+    mutate(nearest_cluster = which(cluster_distm[, clust] == nearest_distance))
+  
+  return(cluster_locations_nearest)
+}
+
+
+Get_Clusters = function(lon, lat, id, cluster_distance, min_trail=5) {
+# initial run ---------------------------------------------------------------------------------
+  
+  message('Calculating all trail distances...')
   results = Calc_Distance(lon, lat, id)
+  
+  message('Performing initial cluster...')
   clusters = hclust(as.dist(results[['distance_matrix']]), method="complete")
   
   results[['xy']][['clust']] = cutree(clusters, h = cluster_distance)
   cluster_results = results[['xy']]@'data'
   
+ 
+# minimize clusters ---------------------------------------------------------------------------
+  geo_df = cbind(id, lon, lat) |>as.data.frame()
+  cluster_locations_nearest = Calc_Distance_Cluster(geo_df, cluster_results)
+  
+  stray_trails = cluster_results |>
+    group_by(clust) |> 
+    filter(n() < min_trail)
+  
+  attempts = 1
+  while(nrow(stray_trails) > 0 & attempts < 100) {
+    message('[Attempt #', str_pad(attempts, width = 2, pad = '0'), '] ',
+            str_pad(nrow(stray_trails), width = 4, pad = ' '),
+            ' stray trails identified. Reducing number of clusters...')
+    loop_results = Minimize_Clusters(cluster_results, cluster_locations_nearest)
+    cluster_results = loop_results[['clust_df']]
+    stray_trails = loop_results[['stray_trails']]
+    cluster_locations_nearest = Calc_Distance_Cluster(geo_df, cluster_results)
+    attempts = attempts + 1
+  }
+
   avg_trail_cluster = cluster_results |>
     group_by(clust) |>
     summarize(n = n()) |>
