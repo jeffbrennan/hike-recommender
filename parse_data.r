@@ -1,13 +1,24 @@
+# data cleaning
 library(tidyverse)
 library(data.table)
 library(jsonlite)
 library(glue)
-library(sf)
-library(ggpubr)
 
+# clustering
 library(sp)
 library(rgdal)
 library(geosphere)
+
+# mapping / viz
+library(sf)
+library(ggpubr)
+library(ggrepel)
+library(ggmap)
+library(osmdata)
+
+# map colors
+rec_color = '#05bbaa'     #teal
+nonrec_color = '#FB836F'  #salmon
 
 # extract relevant data from nested list cols and flatten
 Get_Data = function(fname) { 
@@ -35,11 +46,14 @@ hms_span = function(start, end) {
     }), collapse = ":")
 }
 
-
-
+# get distance matrix between symmetrical lat/lon vectors
 Calc_Distance = function(lon, lat, id=NA) {
-  if (length(id) == 1) {id = rep('1', times = length(lon))}
-  
+  if (length(id) == 1) {
+    id = rep('1', times = length(lon))
+  } else { 
+    message('Generating ', length(lon), 'x', length(lon), ' distance matrix...\n')
+    }
+
   result = tryCatch(
     {
       xy = SpatialPointsDataFrame(
@@ -47,8 +61,6 @@ Calc_Distance = function(lon, lat, id=NA) {
         data.frame(ID = id),
         proj4string=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
       
-
-      message('Generating ', length(lon), 'x', length(lon), ' distance matrix...\n')
       distance_matrix = distm(xy) |> 
         as.data.frame() |> 
         mutate(across(everything(), ~ ./ 1609)) |> 
@@ -72,7 +84,7 @@ Calc_Distance = function(lon, lat, id=NA) {
 # TODO: consider multicore processing with one matrix per contiguous region if decide to add more states
 # 7836 trails -> 61 mil dist values 
 # Cluster trails by creating nxn matrix of distances in miles
-Minimize_Clusters = function(initial_cluster, cluster_locations_nearest, min_trail = 5) { 
+Minimize_Clusters = function(initial_cluster, cluster_locations_nearest, min_trail = 3) { 
 
     minimized_clusters_raw = initial_cluster |> 
     left_join(cluster_locations_nearest |> select(clust, nearest_distance, nearest_cluster), by = 'clust') |> 
@@ -124,8 +136,8 @@ Calc_Distance_Cluster = function(geo_df, cluster_results) {
   return(cluster_locations_nearest)
 }
 
-
-Get_Clusters = function(lon, lat, id, cluster_distance, min_trail=5) {
+# cluster groups of geocoded trails, reducing number of clusters if not enough trails
+Get_Clusters = function(lon, lat, id, cluster_distance, min_trail=3) {
 # initial run ---------------------------------------------------------------------------------
   
   message('Calculating all trail distances...')
@@ -151,7 +163,7 @@ Get_Clusters = function(lon, lat, id, cluster_distance, min_trail=5) {
     message('[Attempt #', str_pad(attempts, width = 2, pad = '0'), '] ',
             str_pad(nrow(stray_trails), width = 4, pad = ' '),
             ' stray trails identified. Reducing number of clusters...')
-    loop_results = Minimize_Clusters(cluster_results, cluster_locations_nearest)
+    loop_results = Minimize_Clusters(cluster_results, cluster_locations_nearest, min_trail)
     cluster_results = loop_results[['clust_df']]
     stray_trails = loop_results[['stray_trails']]
     cluster_locations_nearest = Calc_Distance_Cluster(geo_df, cluster_results)
@@ -183,11 +195,12 @@ start = Sys.time()
 hike_clusters = Get_Clusters(all_trails_raw$long,
                              all_trails_raw$lat,
                              all_trails_raw$ID,
-                             cluster_distance = 25)
+                             cluster_distance = 10,
+                             min_trail = 3)
 message('Time elapsed: ', hms_span(start, Sys.time()))
 
 ## geometry ------------------------------------------------------------------------------------
-all_trails_sf =  st_as_sf(all_trails, coords = c('long', 'lat'), crs = 4326) |> 
+all_trails_sf =  st_as_sf(all_trails_raw, coords = c('long', 'lat'), crs = 4326) |> 
   select(ID, geometry)
 
 
@@ -215,7 +228,8 @@ all_trails = all_trails_sf |>
   mutate(avg_grade = (elevation_gain / length) * 100) |>
   mutate(length = length / 1609) |> 
   mutate(elevation_gain = elevation_gain * 3.281) |> 
-  mutate(difficulty_rating = factor(difficulty_rating, labels = c('easy', 'med', 'hard', '💀')))
+  mutate(difficulty_rating = factor(difficulty_rating, labels = c('easy', 'med', 'hard', '💀'))) |> 
+  mutate(name = str_squish(name))
 
 
 # maps -----------------------------------------------------------------------------------------
@@ -301,3 +315,105 @@ ggsave(filename = 'viz/box_trail_features.png', width = 6, height = 12, dpi = 60
 # in shiny app, given number of days & max hiking time, filter and recommend top suggestions
 # visualize selections against other hikes in the same area with scatter plot of elevation and length
 
+# recommendation viz testing ------------------------------------------------------------------
+## maps ----------------------------------------------------------------------------------------
+Get_Bounds = function(df, zoom_level = 8) {
+  
+  zoom_to = c(mean(df$long), mean(df$lat))  # Berlin
+  zoom_level = zoom_level
+  lon_span = 360 / 2^zoom_level
+  lat_span = 180 / 2^zoom_level
+  
+  lon_bounds = c(zoom_to[1] - lon_span / 2, zoom_to[1] + lon_span / 2)
+  lat_bounds = c(zoom_to[2] - lat_span / 2, zoom_to[2] + lat_span / 2)
+  
+  return(list('lon' = lon_bounds,
+              'lat' = lat_bounds))
+  
+}
+
+
+
+Get_Basemap = function(df, box_zoom, map_zoom) { 
+  bbox = make_bbox(df$long, df$lat,
+                   f = box_zoom)
+  
+  basemap = get_map(location = bbox,
+                    zoom = map_zoom,
+                    source = 'osm') |> 
+    suppressMessages()
+  
+  return(basemap)
+}
+
+Plot_Map = function(df, basemap, fname){ 
+  map = ggmap(basemap) +
+    geom_sf(data = df |> filter(!rec),
+            color = nonrec_color, size = 3,
+            inherit.aes = FALSE) + 
+    geom_sf(data = df |> filter(rec),
+            color = rec_color, size = 5,
+            inherit.aes = FALSE) + 
+    geom_sf(data = df |> filter(rec),
+            shape = 1, color = 'black', size = 5.5,
+            inherit.aes = FALSE) + 
+    geom_label_repel(data = df |> filter(rec),
+                     aes(label = name, x = long, y = lat),
+                     color = 'white',  fill = rec_color, 
+                     size = 4, fontface = "bold",
+                     inherit.aes = FALSE) +
+    theme_void()
+  
+  return(map)
+}
+
+CLUSTER = 1
+rec_test = all_trails |> 
+  filter(distance_cluster == CLUSTER) |> 
+  arrange(desc(popularity)) |> 
+  mutate(rec = row_number() <= 5)
+
+
+trail_basemap = Get_Basemap(rec_test |> filter(rec),
+                            box_zoom = 0.5, 
+                            map_zoom = 14)
+
+
+city_basemap = Get_Basemap(rec_test |> filter(rec),
+                           box_zoom = 5, 
+                           map_zoom = 10)
+
+trail_detail = Plot_Map(rec_test, trail_basemap, 'trail')
+ggsave(glue('viz/cluster_{CLUSTER}_trail_detail.pdf'), plot = trail_detail, dpi = 600, width = 8, height = 8)
+
+city_detail = Plot_Map(rec_test, city_basemap, 'trail')
+ggsave(glue('viz/cluster_{CLUSTER}_city_detail.pdf'), plot = city_detail, dpi = 600, width = 8, height = 8)
+
+
+# comparison vs cluster
+rec_test |>
+  ggplot(aes(x = length, y = elevation_gain)) + 
+  geom_point(data = rec_test |> filter(rec), size = 5, alpha = 1,
+             aes(color = difficulty_rating)) +
+  geom_point(data = rec_test |> filter(!rec), color = 'gray80', size = 2, alpha = 0.5)  +
+  geom_text(data = rec_test |> filter(rec), aes(label = name)) +
+  labs(y = 'elevation gain (feet)',
+       x = 'length (mi)') +
+  facet_wrap(~state_name) +
+  theme_pubr()
+
+# comparison vs state
+rec_test_state = all_trails |>
+  filter(state_name == rec_test$state_name[1]) |> 
+  mutate(rec = ID %in% (rec_test |> filter(rec) |> pull(ID)))
+
+rec_test_state |> 
+  ggplot(aes(x = length, y = elevation_gain)) + 
+  geom_point(data = rec_test_state |> filter(rec), size = 5, alpha = 1,
+             aes(color = difficulty_rating)) +
+  geom_point(data = rec_test_state |> filter(!rec), color = 'gray80', size = 2, alpha = 0.5)  +
+  geom_text(data = rec_test_state |> filter(rec), aes(label = name)) +
+  labs(y = 'elevation gain (feet)',
+       x = 'length (mi)') +
+  facet_wrap(~state_name) +
+  theme_pubr()
