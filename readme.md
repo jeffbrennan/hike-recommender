@@ -27,3 +27,14 @@ TODO:
 - [x] create relative distance metric using my home address 
 - [x] identify trails that are close together
 - [ ] weight trails based on reviews/ratings/difficulty etc
+
+
+### Cluster viz
+
+----
+
+![img](viz/cluster_1_city_detail.png)
+
+---
+
+![img](viz/cluster_1_trail_detail.png)
