@@ -30,9 +30,15 @@ Get_Data = function(fname) {
     mutate(lat = `_geoloc`[[1]]) |> 
     mutate(long = `_geoloc`[[2]]) |> 
     ungroup() |> 
-    select(-activities, -`_geoloc`)
+    select(-activities, -`_geoloc`, -units, -objectID,
+           -duration_minutes_hiking,
+           -duration_minutes_mountain_biking,
+           -duration_minutes_cycling)
   return(result)
 }
+
+
+all_trails_combined |> filter(duration_minutes != duration_minutes_hiking) |> View()
 
 # https://stackoverflow.com/questions/32100133/print-the-time-a-script-has-been-running-in-r
 hms_span = function(start, end) {
@@ -209,6 +215,7 @@ home_address = fread('backend/home.csv')
 
 # dplyr 26 seconds
 start_time = Sys.time()
+# TODO: add capability to compute distance from any point
 home_distance = all_trails_raw |> 
   select(ID, lat, long) |> 
   group_by(row_number()) |> 
@@ -219,8 +226,14 @@ home_distance = all_trails_raw |>
   select(-`row_number()`)
 message('Time elapsed: ', hms_span(start_time, Sys.time()))
 
+
+
+
+
+
+
 ## combine -------------------------------------------------------------------------------------
-all_trails = all_trails_sf |> 
+all_trails_combined = all_trails_sf |> 
   left_join(all_trails_raw, by = 'ID') |> 
   left_join(hike_clusters |> rename(distance_cluster = clust),
             by = 'ID') |> 
@@ -229,9 +242,37 @@ all_trails = all_trails_sf |>
   mutate(length = length / 1609) |> 
   mutate(elevation_gain = elevation_gain * 3.281) |> 
   mutate(difficulty_rating = factor(difficulty_rating, labels = c('easy', 'med', 'hard', '💀'))) |> 
-  mutate(name = str_squish(name))
+  mutate(name = str_squish(name)) |> 
+  mutate(ID = as.character(ID)) |> 
+  mutate(created_at_ymd = as.Date(created_at / 60 / 60 / 24, origin = '1970-01-01'))
 
 
+## weighting -----------------------------------------------------------------------------------
+range01 = function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+
+# TODO: make dynamic based on whether easy or hard hike is desired
+weighting_vars = list('pos' = c('popularity', 'num_reviews', 'num_photos', 'avg_rating'),
+                      'neg' = c('duration_minutes', 'avg_grade', 'created_at'))
+
+
+
+all_trails_weight = all_trails_combined |>
+  st_drop_geometry() |> 
+  select(all_of(c('ID', 'route_type', weighting_vars[['pos']], weighting_vars[['neg']]))) |>
+  mutate(route_type_pref = case_when(route_type == 'O' ~ 0.3,
+                                     route_type == 'L' ~ 0.7,
+                                     TRUE ~ 0)) |> 
+  mutate(across(where(is.numeric), range01, na.rm = TRUE)) |>
+  mutate(pos_weight = rowSums(across(weighting_vars[['pos']]))) |> 
+  mutate(neg_weight = rowSums(across(weighting_vars[['neg']]))) |> 
+
+  # TODO: add actual weights instead of just summing values
+  mutate(weight = pos_weight - neg_weight)
+
+  
+all_trails = all_trails_combined |> 
+  left_join(all_trails_weight |> select(ID, pos_weight, neg_weight, weight), by = 'ID')
+  
 # maps -----------------------------------------------------------------------------------------
 states = map_data('state')
 
@@ -315,6 +356,55 @@ ggsave(filename = 'viz/box_trail_features.png', width = 6, height = 12, dpi = 60
 # in shiny app, given number of days & max hiking time, filter and recommend top suggestions
 # visualize selections against other hikes in the same area with scatter plot of elevation and length
 
+# need to obtain combinations of hikes within a cluster, prioritizing most desireable
+max_distance = 50
+max_length = 10 
+max_elevation = 5000
+max_duration = 60 * 4 
+Select_Clusters = function(df, max_distance, max_length, max_elevation, max_duration, state = NA) { 
+  # TODO: refactor with mutate across
+  if(!is.na(state)){df = df |> filter(state_name %in% state)}
+  
+  ranks = df |>
+    st_drop_geometry() |> 
+    select(ID, distance_cluster, weight, home_distance, length, elevation_gain, duration_minutes) |> 
+    group_by(distance_cluster) |> 
+    filter(min(home_distance) <= max_distance) |>
+    ungroup() |> 
+    filter(length <= max_length) |>
+    filter(elevation_gain <= max_elevation) |>
+    filter(duration_minutes <= max_duration) |>
+    group_by(distance_cluster) |> 
+    arrange(distance_cluster, desc(weight)) |> 
+    mutate(length_cumsum = cumsum(length)) |>
+    mutate(elevation_cumsum = cumsum(elevation_gain)) |>
+    mutate(duration_cumsum = cumsum(duration_minutes)) |>
+    mutate(length_flag = length_cumsum <= max_length * 1.1) |> 
+    mutate(elevation_flag = elevation_cumsum <= max_elevation * 1.1) |> 
+    mutate(duration_flag = duration_cumsum <= max_duration * 1.1) |> 
+    filter(length_flag & elevation_flag & duration_flag) |> 
+    mutate(cluster_weight = mean(weight)) |>
+    ungroup() |> 
+    mutate(cluster_rank = dense_rank(desc(cluster_weight)))
+  
+  result_df = df |>
+    inner_join(ranks |> select(ID, cluster_weight, cluster_rank), by = 'ID') |> 
+    select(ID, state_name, city_name, name,
+           difficulty_rating, num_reviews, num_photos,
+           home_distance, length, elevation_gain,
+           cluster_weight, cluster_rank,
+           description)
+}
+
+
+recs = Select_Clusters(all_trails,
+                       max_distance = 150,
+                       max_length = 10,
+                       max_elevation = 7500,
+                       max_duration = 60 * 4)
+
+
+
 # recommendation viz testing ------------------------------------------------------------------
 ## maps ----------------------------------------------------------------------------------------
 Get_Bounds = function(df, zoom_level = 8) {
@@ -331,8 +421,6 @@ Get_Bounds = function(df, zoom_level = 8) {
               'lat' = lat_bounds))
   
 }
-
-
 
 Get_Basemap = function(df, box_zoom, map_zoom) { 
   bbox = make_bbox(df$long, df$lat,
@@ -384,10 +472,10 @@ city_basemap = Get_Basemap(rec_test |> filter(rec),
                            map_zoom = 10)
 
 trail_detail = Plot_Map(rec_test, trail_basemap, 'trail')
-ggsave(glue('viz/cluster_{CLUSTER}_trail_detail.pdf'), plot = trail_detail, dpi = 600, width = 8, height = 8)
+ggsave(glue('viz/cluster_{CLUSTER}_trail_detail.png'), plot = trail_detail, dpi = 600, width = 8, height = 8)
 
 city_detail = Plot_Map(rec_test, city_basemap, 'trail')
-ggsave(glue('viz/cluster_{CLUSTER}_city_detail.pdf'), plot = city_detail, dpi = 600, width = 8, height = 8)
+ggsave(glue('viz/cluster_{CLUSTER}_city_detail.png'), plot = city_detail, dpi = 600, width = 8, height = 8)
 
 
 # comparison vs cluster
