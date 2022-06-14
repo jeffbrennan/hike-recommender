@@ -1,5 +1,6 @@
 library(shiny)
 library(data.table)
+library(glue)
 
 # geocoding
 library(sp) # home distance
@@ -54,7 +55,7 @@ Select_Clusters = function(df, max_distance, max_length, max_elevation, max_dura
     inner_join(ranks |> select(ID, cluster_weight, cluster_rank), by = 'ID') |> 
     select(ID, lat, long, link, state_name, city_name, name,
            difficulty_rating, num_reviews, num_photos,
-           home_distance, length, elevation_gain, avg_grade,
+           duration_minutes, home_distance, length, elevation_gain, avg_grade,
            cluster_weight, cluster_rank,
            description) |> 
     filter(cluster_rank <= 100) |>
@@ -95,68 +96,122 @@ Plot_Map = function(df, basemap, fname){
   return(map)
 }
 
-# TODO: improve slider
 ui = fluidPage(
-    titlePanel("Hike Recommender"),
-    # TODO: break this up into 2 cols
-    sidebarLayout(
-        sidebarPanel(
-            textInput("starting_location",
-                      "Enter a starting location",
-                      value = ''),
-            checkboxGroupInput("difficulty_choices", 
-                               h3("Checkbox group"), 
-                               choices = list("Easy" = 1, 
-                                              "Medium" = 2, 
-                                              "Hard" = 3,
-                                              "💀" = 4),
-                               selected = c(1,2,3)),
-            sliderInput("max_distance",
-                        "Max distance:",
-                        min = 1,
-                        max = 500,
-                        value = 150),
-          sliderInput("max_length",
-                      "Max length (mi):",
-                      min = 1,
-                      max = 50,
-                      value = 7.5),
-          sliderInput("max_elevation",
-                      "Max elevation gain (ft):",
-                      min = 1,
-                      max = 10000,
-                      value = 2000),
-          sliderInput("max_duration",
-                      "Max Hike Duration:",
-                      min = 10,
-                      max = 60*10,
-                      value = 60*4)
-        ),
-        mainPanel(
-           uiOutput('all_trail_hover_info'),
-           # TODO: figure out way to not rerender map on zoom changes
-           # TODO: center & align this better
-           fluidRow(splitLayout(cellWidths = c('40%', '60%'),
-                                plotOutput("all_trail_map",
-                                           width = 800,
-                                           height = 500,
-                                           hover = hoverOpts("all_trail_hover", delay = 50, delayType = "debounce")
-                                           ),
-                                plotOutput("city_map",
-                                           width = 800, height = 600
-                                           )
-                             )
-                   ),
-           # 
-           # TODO: see if its possible to highlight point on map from selection on data table
-           dataTableOutput('cluster_table', width = '75%')
-           )
-        )
+  # tags$head(tags$style(HTML("div#inline label { width: 32%; }
+  #                              div#inline input { display: inline-block; width: 68%;}"))),
+  # tags$head(
+  #   tags$style(type="text/css", "#inline label{ display: table-cell; text-align: left; vertical-align: middle; }
+  #                                  #inline .form-group { display: table-row;}")),
+    fluidRow(
+      column(6, offset = 3,
+             align = 'center',
+             style = glue("background-color:{rec_color}"),
+             h1("Hike Recommender")
+            )
+    ),
+    fluidRow(
+      column(6, offset = 3,
+             fluidRow(
+               column(6,
+                      sliderInput("difficulty_choices",
+                                  "Hike Difficulty",
+                                  min = 1,
+                                  max = 7,
+                                  step = 2, 
+                                  value = 5,
+                                  ticks = FALSE,
+                                  width = '100%')
+                      ),
+               column(2, ''),
+               column(4, align = 'right',
+                      textInput("starting_location",
+                                "Enter a starting location",
+                                value = '',
+                                width = '100%')
+                      )
+             )
+      )),
+    fluidRow(
+      column(6, offset = 3,
+             fluidRow(
+               column(6,
+                      sliderInput("max_distance",
+                                  "Driving Distance (mi): ",
+                                  min = 1,
+                                  max = 500,
+                                  value = 150,
+                                  width = '100%',
+                                  ticks = FALSE)
+               ),
+               column(6, align = 'right',
+                      sliderInput("max_duration",
+                                  "Hike Duration (min): ",
+                                  min = 10,
+                                  max = 60*10,
+                                  value = 60*4,
+                                  width = '100%',
+                                  ticks = FALSE)
+               )
+             )
       )
+    ),
+    fluidRow(
+      column(6, offset = 3,
+             fluidRow(
+               column(6,
+                      sliderInput("max_length",
+                                  "Hike Length (mi): ",
+                                  min = 1,
+                                  max = 50,
+                                  value = 7.5,
+                                  width = '100%',
+                                  ticks = FALSE)
+               ),
+               column(6, align = 'right',
+                      sliderInput("max_elevation",
+                                  "Elevation gain (ft): ",
+                                  min = 1,
+                                  max = 10000,
+                                  value = 2000,
+                                  width = '100%', 
+                                  ticks = FALSE)
+                      )
+               )
+             )
+  ),
+  # main panel
+  fluidRow(
+    column(10, offset = 1,
+           fluidRow(
+             column(5, align = 'center',
+                    style = glue("background-color:{nonrec_color}"),
+                    uiOutput('all_trail_hover_info')
+             )),
+           fluidRow(
+            column(5, align = 'left',
+                   style = glue("background-color:{rec_color}"),
+                   plotOutput("all_trail_map",
+                              hover = hoverOpts("all_trail_hover", delay = 50, delayType = "debounce")
+                              ),
+                   ),
+            column(2, ''),
+            column(5,
+                   style = glue("background-color:{nonrec_color}"),
+                   plotOutput("city_map")
+                   )
+           )
+  )),
+    fluidRow(
+      column(10, offset = 1,
+             style = glue("background-color:{nonrec_color}"),
+             dataTableOutput('cluster_table')
+           )
+      )
+)
 
 server = function(input, output) {
     all_trails_raw = fread('C:/Users/jeffb/Desktop/Life/personal-projects/hike-recommender/trails/all_trails_weighted.csv') |> 
-      mutate(description = str_c(word(description, start = 1, end = 20, sep = fixed(" ")), '...')) |> 
+      mutate(description = str_c(word(description, start = 1, end = 60, sep = fixed(" ")), '...')) |> 
       mutate(description = ifelse(is.na(description), '', description))
     
     all_trails = reactive({
@@ -207,7 +262,8 @@ server = function(input, output) {
                   color = 'gray70', size = 2) +
           scale_color_continuous(low = 'dodgerblue',
                                  high = 'gray95') +
-          theme_void() +
+          theme_void() + 
+          theme(plot.background = element_rect(fill = 'gray90')) +
           theme(legend.position = 'none')
         
           all_trails_plot
@@ -220,21 +276,17 @@ server = function(input, output) {
           
         hover = input$all_trail_hover
         point = nearPoints(all_trails_selection(), hover, threshold = 5, maxpoints = 1, addDist = TRUE)
-  
-        placeholder = HTML(paste0("<br/>",
-                                  "<br/>",
-                                  "<br/>",
-                                  "<br/>"))
-        # refactor?
+        placeholder = HTML(paste0(rep('<br/>', times = 2), sep = ''))
+                           
         if (nrow(point) == 0) {
           placeholder
         } else if (point$cluster_rank > 10) {
           placeholder
         } else if (point$cluster_rank <= 10) { 
           HTML(paste0("#", str_pad(point$cluster_rank, width = 2, pad = '0'), "<b> ", point$name, "</b>", "<br/>",
-                      "<b>", emo::ji('right_arrow'), " </b>️", round(point$length, 2), " miles <br/>",
-                      "<b>", emo::ji('up_arrow'), " </b>️", round(point$elevation_gain, 0), " feet <br/>",
-                      "<b>", emo::ji('up_right_arrow'), " </b>️", round(point$avg_grade, 2), "% <br/>"))
+                      "<b>",  round(point$length, 2), " mi </b>️" ,emo::ji('right_arrow'),
+                      " <b>", round(point$elevation_gain, 0), " ft </b>️", emo::ji('up_arrow'),
+                      " <b>", round(point$avg_grade, 2), "% </b>", emo::ji('up_right_arrow')))
         }
       }
     })
@@ -294,20 +346,29 @@ server = function(input, output) {
       if (nrow(all_trails_selection()) > 0) { 
         
         tbl = all_trails_selection() |> 
-          select(-ID, -lat, -long, -name, -cluster_rank) |>
-          rename(state = state_name,
-                 city = city_name,
-                 difficulty = difficulty_rating,
-                 reviews = num_reviews,
-                 photos = num_photos) |> 
-          mutate(across(c(home_distance:cluster_weight), ~round(., 2)))
+          select(link, state_name, city_name, difficulty_rating, duration_minutes, description) |>
+          rowwise() |> 
+          mutate(location = HTML(str_c(city_name, ',<br/>', state_name))) |> 
+          ungroup() |> 
+          select(-city_name, -state_name) |> 
+          # select(-ID, -lat, -long, -name, -cluster_rank) |>
+          rename(difficulty = difficulty_rating,
+                 `hike time` = duration_minutes) |> 
+          relocate(location, .after = 'link')
+        # mutate(across(c(home_distance:cluster_weight), ~round(., 2)))
         
         DT::datatable(tbl, escape = FALSE,
                       options = list(
-                        autoWidth = TRUE,
-                        columnDefs = list(list(width = '50px', targets = "_all")))
-                     )
-      }
+                        autoWidth = TRUE
+                        # scrollX = TRUE,
+                        # columnDefs = list(
+                        #   list(width = '50px', targets = c(2)),
+                        #   list(width = '100px', targets = c(6)),
+                        #   list(width = '50px', targets = c(3:5))
+                        #   )
+                        )
+                      )
+        }
     })
 }
 
