@@ -179,84 +179,97 @@ server = function(input, output) {
     
     # have this just show all trails with highlighted values + size for selections
     output$all_trail_map = renderPlot({
-      states = map_data('state')
-      
-      states_selection = states |>
-        filter(region %in% (all_trails_selection() |>
-                              pull(state_name) |>
-                              unique() |>
-                              str_to_lower())
-               )
-      
-      all_trails_selection_sf = all_trails_selection() |> 
-        st_as_sf(coords = c('long', 'lat'), crs = 4326) |> 
-        select(cluster_rank, geometry)
-      
-      all_trails_plot =  all_trails_selection_sf |> 
-        ggplot() + 
-        geom_polygon(data = states_selection, aes(x=long, y=lat, group=group),
-                    color="black", fill="gray99" ) +
-        geom_sf(data = all_trails_selection_sf |> filter(cluster_rank <= 10), 
-                aes(color = cluster_rank), size = 5) +
-        geom_sf(data = all_trails_selection_sf |> filter(cluster_rank <= 10), 
-                shape = 1, color = 'black', size = 5.5,
-                inherit.aes = FALSE) +
-        geom_sf(data = all_trails_selection_sf |> filter(cluster_rank > 10),
-                color = 'gray70', size = 2) +
-        scale_color_continuous(low = 'dodgerblue',
-                               high = 'gray95') +
-        theme_void() +
-        theme(legend.position = 'none')
-      
-        all_trails_plot
+      if (nrow(all_trails_selection()) > 0) { 
+    
+        states = map_data('state')
+        
+        states_selection = states |>
+          filter(region %in% (all_trails_selection() |>
+                                pull(state_name) |>
+                                unique() |>
+                                str_to_lower())
+                 )
+        
+        all_trails_selection_sf = all_trails_selection() |> 
+          st_as_sf(coords = c('long', 'lat'), crs = 4326) |> 
+          select(cluster_rank, geometry)
+        
+        all_trails_plot =  all_trails_selection_sf |> 
+          ggplot() + 
+          geom_polygon(data = states_selection, aes(x=long, y=lat, group=group),
+                      color="black", fill="gray99" ) +
+          geom_sf(data = all_trails_selection_sf |> filter(cluster_rank <= 10), 
+                  aes(color = cluster_rank), size = 5) +
+          geom_sf(data = all_trails_selection_sf |> filter(cluster_rank <= 10), 
+                  shape = 1, color = 'black', size = 5.5,
+                  inherit.aes = FALSE) +
+          geom_sf(data = all_trails_selection_sf |> filter(cluster_rank > 10),
+                  color = 'gray70', size = 2) +
+          scale_color_continuous(low = 'dodgerblue',
+                                 high = 'gray95') +
+          theme_void() +
+          theme(legend.position = 'none')
+        
+          all_trails_plot
+        
+      }
     })
     
     output$all_trail_hover_info = renderText({
-      hover = input$all_trail_hover
-      point = nearPoints(all_trails_selection(), hover, threshold = 5, maxpoints = 1, addDist = TRUE)
-
-      placeholder = HTML(paste0("<br/>",
-                                "<br/>",
-                                "<br/>",
-                                "<br/>"))
-      # refactor?
-      if (nrow(point) == 0) {
-        placeholder
-      } else if (point$cluster_rank > 10) {
-        placeholder
-      } else if (point$cluster_rank <= 10) { 
-        HTML(paste0("#", str_pad(point$cluster_rank, width = 2, pad = '0'), "<b> ", point$name, "</b>", "<br/>",
-                    "<b>", emo::ji('right_arrow'), " </b>️", round(point$length, 2), " miles <br/>",
-                    "<b>", emo::ji('up_arrow'), " </b>️", round(point$elevation_gain, 0), " feet <br/>",
-                    "<b>", emo::ji('up_right_arrow'), " </b>️", round(point$avg_grade, 2), "% <br/>"))
+      if (nrow(all_trails_selection()) > 0) { 
+          
+        hover = input$all_trail_hover
+        point = nearPoints(all_trails_selection(), hover, threshold = 5, maxpoints = 1, addDist = TRUE)
+  
+        placeholder = HTML(paste0("<br/>",
+                                  "<br/>",
+                                  "<br/>",
+                                  "<br/>"))
+        # refactor?
+        if (nrow(point) == 0) {
+          placeholder
+        } else if (point$cluster_rank > 10) {
+          placeholder
+        } else if (point$cluster_rank <= 10) { 
+          HTML(paste0("#", str_pad(point$cluster_rank, width = 2, pad = '0'), "<b> ", point$name, "</b>", "<br/>",
+                      "<b>", emo::ji('right_arrow'), " </b>️", round(point$length, 2), " miles <br/>",
+                      "<b>", emo::ji('up_arrow'), " </b>️", round(point$elevation_gain, 0), " feet <br/>",
+                      "<b>", emo::ji('up_right_arrow'), " </b>️", round(point$avg_grade, 2), "% <br/>"))
+        }
       }
     })
     
     output$city_map = renderPlot({
-      all_trails_combined = all_trails() |> 
-        left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
-        mutate(rec = !is.na(ID.y)) |> 
-        rename(ID = ID.x) |> 
-        select(-ID.y)
+      if (nrow(all_trails_selection()) > 0) {
       
-      best_cluster = all_trails_combined |>
-        filter(cluster_rank == min(cluster_rank, na.rm = TRUE)) |> 
-        pull(distance_cluster)
-      
-      # TODO: pls refactor
-      all_trails_out = all_trails_combined |> 
-        filter(distance_cluster == best_cluster) |> 
-        st_as_sf(coords = c('long', 'lat'), crs = 4326, remove = FALSE)
+        all_trails_combined = all_trails() |> 
+          left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
+          mutate(rec = !is.na(ID.y)) |> 
+          rename(ID = ID.x) |> 
+          select(-ID.y)
         
-      city_basemap = Get_Basemap(all_trails_out,
-                                 box_zoom = 3, 
-                                 map_zoom = 10)
-      
-      city_detail = Plot_Map(all_trails_out, city_basemap, 'trail')
-      city_detail
+        best_cluster = all_trails_combined |>
+          filter(cluster_rank == min(cluster_rank, na.rm = TRUE)) |> 
+          pull(distance_cluster)
+        
+        # TODO: pls refactor
+        all_trails_out = all_trails_combined |> 
+          filter(distance_cluster == best_cluster) |> 
+          st_as_sf(coords = c('long', 'lat'), crs = 4326, remove = FALSE)
+          
+        city_basemap = Get_Basemap(all_trails_out,
+                                   box_zoom = 3, 
+                                   map_zoom = 10)
+        
+        city_detail = Plot_Map(all_trails_out, city_basemap, 'trail')
+        city_detail
+        
+      }
     })
     
     output$trail_map = renderPlot({
+      if (nrow(all_trails_selection()) > 0) { 
+        
       all_trails_combined = all_trails() |> 
         left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
         mutate(rec = !is.na(ID.y))
@@ -274,23 +287,27 @@ server = function(input, output) {
       
       trail_detail = Plot_Map(all_trails_out, trail_basemap, 'trail')
       trail_detail
+      }
     })
     
     output$cluster_table = renderDataTable({
-      tbl = all_trails_selection() |> 
-        select(-ID, -lat, -long, -name, -cluster_rank) |>
-        rename(state = state_name,
-               city = city_name,
-               difficulty = difficulty_rating,
-               reviews = num_reviews,
-               photos = num_photos) |> 
-        mutate(across(c(home_distance:cluster_weight), ~round(., 2)))
-      
-      DT::datatable(tbl, escape = FALSE,
-                    options = list(
-                      autoWidth = TRUE,
-                      columnDefs = list(list(width = '50px', targets = "_all")))
-                   )
+      if (nrow(all_trails_selection()) > 0) { 
+        
+        tbl = all_trails_selection() |> 
+          select(-ID, -lat, -long, -name, -cluster_rank) |>
+          rename(state = state_name,
+                 city = city_name,
+                 difficulty = difficulty_rating,
+                 reviews = num_reviews,
+                 photos = num_photos) |> 
+          mutate(across(c(home_distance:cluster_weight), ~round(., 2)))
+        
+        DT::datatable(tbl, escape = FALSE,
+                      options = list(
+                        autoWidth = TRUE,
+                        columnDefs = list(list(width = '50px', targets = "_all")))
+                     )
+      }
     })
 }
 
