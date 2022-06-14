@@ -1,10 +1,30 @@
 library(shiny)
-library(tidyverse)
 library(data.table)
-library(sf)
-library(DT)
-library(emo)
 
+# geocoding
+library(sp) # home distance
+library(geosphere)
+library(tmaptools)
+
+# viz
+# plots
+library(sf)
+library(tidyverse)
+library(ggrepel)
+library(ggmap)
+
+# table
+library(DT)
+
+# map colors
+rec_color = '#05bbaa'     #teal
+nonrec_color = '#FB836F'  #salmon
+
+Calc_Distance = function(lon, lat) {
+  return(distm(matrix(c(lat, lon), ncol = 2))[2,1])
+}
+
+# geocode test
 Select_Clusters = function(df, max_distance, max_length, max_elevation, max_duration, state = NA) { 
   if(!is.na(state)){df = df |> filter(state_name %in% state)}
   
@@ -32,7 +52,7 @@ Select_Clusters = function(df, max_distance, max_length, max_elevation, max_dura
   
   result_df = df |>
     inner_join(ranks |> select(ID, cluster_weight, cluster_rank), by = 'ID') |> 
-    select(ID, link, state_name, city_name, name,
+    select(ID, lat, long, link, state_name, city_name, name,
            difficulty_rating, num_reviews, num_photos,
            home_distance, length, elevation_gain, avg_grade,
            cluster_weight, cluster_rank,
@@ -78,9 +98,19 @@ Plot_Map = function(df, basemap, fname){
 # TODO: improve slider
 ui = fluidPage(
     titlePanel("Hike Recommender"),
-
+    # TODO: break this up into 2 cols
     sidebarLayout(
         sidebarPanel(
+            textInput("starting_location",
+                      "Enter a starting location",
+                      value = ''),
+            checkboxGroupInput("difficulty_choices", 
+                               h3("Checkbox group"), 
+                               choices = list("Easy" = 1, 
+                                              "Medium" = 2, 
+                                              "Hard" = 3,
+                                              "💀" = 4),
+                               selected = c(1,2,3)),
             sliderInput("max_distance",
                         "Max distance:",
                         min = 1,
@@ -104,14 +134,12 @@ ui = fluidPage(
         ),
         mainPanel(
            uiOutput('all_trail_hover_info'),
-          
-           
            # TODO: figure out way to not rerender map on zoom changes
            # TODO: center & align this better
            fluidRow(splitLayout(cellWidths = c('40%', '60%'),
                                 plotOutput("all_trail_map",
-                                           # width = 800, 
-                                           # height = 500,
+                                           width = 800,
+                                           height = 500,
                                            hover = hoverOpts("all_trail_hover", delay = 50, delayType = "debounce")
                                            ),
                                 plotOutput("city_map",
@@ -119,44 +147,61 @@ ui = fluidPage(
                                            )
                              )
                    ),
-           
+           # 
            # TODO: see if its possible to highlight point on map from selection on data table
            dataTableOutput('cluster_table', width = '75%')
            )
         )
       )
 
-# input = list(max_distance = 150,
-#              max_length = 7.5,
-#              max_elevation = 2000,
-#              max_duration = 60*4)
-
 server = function(input, output) {
-    all_trails = fread('C:/Users/jeffb/Desktop/Life/personal-projects/hike-recommender/trails/all_trails_weighted.csv') |> 
+    all_trails_raw = fread('C:/Users/jeffb/Desktop/Life/personal-projects/hike-recommender/trails/all_trails_weighted.csv') |> 
       mutate(description = str_c(word(description, start = 1, end = 20, sep = fixed(" ")), '...')) |> 
       mutate(description = ifelse(is.na(description), '', description))
     
-    states = map_data('state')
-  
+    all_trails = reactive({
+      if(input$starting_location != '') { 
+        home_address = tmaptools::geocode_OSM(input$starting_location)[['coords']]
+        all_trails_raw |>
+          rowwise() |> 
+          mutate(home_distance =  Calc_Distance(c(lat, home_address[['y']]),
+                                                c(long, home_address[['x']]))) |> 
+          ungroup() |> 
+          mutate(home_distance = home_distance / 1609)
+      } else {
+        all_trails_raw
+        }
+    })
+    
+    all_trails_selection = reactive({
+      Select_Clusters(all_trails(), input$max_distance, input$max_length, input$max_elevation, input$max_distance)
+    })
+    
     # have this just show all trails with highlighted values + size for selections
     output$all_trail_map = renderPlot({
+      states = map_data('state')
       
-      all_trails_selection = Select_Clusters(all_trails, input$max_distance, input$max_length, input$max_elevation, input$max_duration) |> 
-        left_join(all_trails |> select(ID, long, lat), by = 'ID') |> 
-        st_as_sf(coords = c('long', 'lat'), crs = 4326)
-      states_selection = states |> filter(region %in% str_to_lower(unique(all_trails_selection$state_name)))
+      states_selection = states |>
+        filter(region %in% (all_trails_selection() |>
+                              pull(state_name) |>
+                              unique() |>
+                              str_to_lower())
+               )
       
-      all_trails_plot = all_trails_selection |> 
-        # st_as_sf(coords = c('long', 'lat'), crs = 4326) |>
+      all_trails_selection_sf = all_trails_selection() |> 
+        st_as_sf(coords = c('long', 'lat'), crs = 4326) |> 
+        select(cluster_rank, geometry)
+      
+      all_trails_plot =  all_trails_selection_sf |> 
         ggplot() + 
         geom_polygon(data = states_selection, aes(x=long, y=lat, group=group),
                     color="black", fill="gray99" ) +
-        geom_sf(data = all_trails_selection |> filter(cluster_rank <= 10), 
+        geom_sf(data = all_trails_selection_sf |> filter(cluster_rank <= 10), 
                 aes(color = cluster_rank), size = 5) +
-        geom_sf(data = all_trails_selection |> filter(cluster_rank <= 10), 
+        geom_sf(data = all_trails_selection_sf |> filter(cluster_rank <= 10), 
                 shape = 1, color = 'black', size = 5.5,
                 inherit.aes = FALSE) +
-        geom_sf(data = all_trails_selection |> filter(cluster_rank > 10),
+        geom_sf(data = all_trails_selection_sf |> filter(cluster_rank > 10),
                 color = 'gray70', size = 2) +
         scale_color_continuous(low = 'dodgerblue',
                                high = 'gray95') +
@@ -166,15 +211,10 @@ server = function(input, output) {
         all_trails_plot
     })
     
-    
     output$all_trail_hover_info = renderText({
-      all_trails_selection = Select_Clusters(all_trails, input$max_distance, input$max_length, input$max_elevation, input$max_duration) |> 
-        left_join(all_trails |> select(ID, long, lat), by = 'ID')
-      
       hover = input$all_trail_hover
-      point = nearPoints(all_trails_selection, hover, threshold = 5, maxpoints = 1, addDist = TRUE)
-      # if (nrow(point) == 0) return(NULL)
-     
+      point = nearPoints(all_trails_selection(), hover, threshold = 5, maxpoints = 1, addDist = TRUE)
+
       placeholder = HTML(paste0("<br/>",
                                 "<br/>",
                                 "<br/>",
@@ -193,11 +233,8 @@ server = function(input, output) {
     })
     
     output$city_map = renderPlot({
-      all_trails_selection = Select_Clusters(all_trails, input$max_distance, input$max_length, input$max_elevation, input$max_distance) |> 
-        select(ID, cluster_rank)
-
-      all_trails_combined = all_trails |> 
-        left_join(all_trails_selection |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
+      all_trails_combined = all_trails() |> 
+        left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
         mutate(rec = !is.na(ID.y)) |> 
         rename(ID = ID.x) |> 
         select(-ID.y)
@@ -220,12 +257,8 @@ server = function(input, output) {
     })
     
     output$trail_map = renderPlot({
-      all_trails_selection = Select_Clusters(all_trails, input$max_distance, input$max_length, input$max_elevation, input$max_distance) |> 
-        select(ID, cluster_rank)
-      
-      
-      all_trails_combined = all_trails |> 
-        left_join(all_trails_selection |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
+      all_trails_combined = all_trails() |> 
+        left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
         mutate(rec = !is.na(ID.y))
       
       best_cluster = all_trails_combined |> filter(cluster_rank == min(cluster_rank, na.rm = TRUE)) |> pull(distance_cluster)
@@ -243,17 +276,15 @@ server = function(input, output) {
       trail_detail
     })
     
-    
-    # TODO: figure out way to apply selection once
     output$cluster_table = renderDataTable({
-      tbl = Select_Clusters(all_trails, input$max_distance, input$max_length, input$max_elevation, input$max_distance) |> 
-        select(-ID, -name, -cluster_rank) |>
+      tbl = all_trails_selection() |> 
+        select(-ID, -lat, -long, -name, -cluster_rank) |>
         rename(state = state_name,
                city = city_name,
                difficulty = difficulty_rating,
                reviews = num_reviews,
                photos = num_photos) |> 
-        mutate(across(c(home_distance:cluster_weight), ~round(., 3)))
+        mutate(across(c(home_distance:cluster_weight), ~round(., 2)))
       
       DT::datatable(tbl, escape = FALSE,
                     options = list(
@@ -262,5 +293,11 @@ server = function(input, output) {
                    )
     })
 }
+
+# input = list(max_distance = 150,
+#              max_length = 7.5,
+#              max_elevation = 2000,
+#              max_duration = 60*4)
+
 
 shinyApp(ui = ui, server = server)
