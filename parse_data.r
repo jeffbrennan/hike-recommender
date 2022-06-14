@@ -33,6 +33,8 @@ Get_Data = function(fname) {
     select(-activities, -`_geoloc`, -units, -objectID,
            -duration_minutes_hiking,
            -duration_minutes_mountain_biking,
+           -duration_minutes_trail_running,
+           -country_id, -country_name, -has_profile_photo, -profile_photo_data,
            -duration_minutes_cycling)
   return(result)
 }
@@ -226,12 +228,6 @@ home_distance = all_trails_raw |>
   select(-`row_number()`)
 message('Time elapsed: ', hms_span(start_time, Sys.time()))
 
-
-
-
-
-
-
 ## combine -------------------------------------------------------------------------------------
 all_trails_combined = all_trails_sf |> 
   left_join(all_trails_raw, by = 'ID') |> 
@@ -244,7 +240,10 @@ all_trails_combined = all_trails_sf |>
   mutate(difficulty_rating = factor(difficulty_rating, labels = c('easy', 'med', 'hard', '💀'))) |> 
   mutate(name = str_squish(name)) |> 
   mutate(ID = as.character(ID)) |> 
-  mutate(created_at_ymd = as.Date(created_at / 60 / 60 / 24, origin = '1970-01-01'))
+  mutate(created_at_ymd = as.Date(created_at / 60 / 60 / 24, origin = '1970-01-01')) |> 
+  mutate(slug = str_c('https://alltrails.com/explore/', slug)) |> 
+  rename(link = slug) |> 
+  mutate(link = str_c("<a href='",link,"'> ", name, " </a>"))
 
 
 ## weighting -----------------------------------------------------------------------------------
@@ -265,14 +264,16 @@ all_trails_weight = all_trails_combined |>
   mutate(across(where(is.numeric), range01, na.rm = TRUE)) |>
   mutate(pos_weight = rowSums(across(weighting_vars[['pos']]))) |> 
   mutate(neg_weight = rowSums(across(weighting_vars[['neg']]))) |> 
-
   # TODO: add actual weights instead of just summing values
   mutate(weight = pos_weight - neg_weight)
 
   
+
+## final combine -------------------------------------------------------------------------------
 all_trails = all_trails_combined |> 
   left_join(all_trails_weight |> select(ID, pos_weight, neg_weight, weight), by = 'ID')
-  
+
+fwrite(all_trails, 'trails/all_trails_weighted.csv')
 # maps -----------------------------------------------------------------------------------------
 states = map_data('state')
 
@@ -306,6 +307,16 @@ all_trails |>
   theme_void()
 
 # exploration ---------------------------------------------------------------------------------
+# duration diffs
+all_trails |>
+  # filter(duration_minutes_hiking < 600) |>
+  ggplot(aes(x = duration_minutes, y = duration_minutes_trail_running)) + 
+  geom_point(aes(color = difficulty_rating)) + 
+  labs(y = 'elevation gain (feet)',
+       x = 'length (mi)') +
+  facet_wrap(~state_name) +
+  theme_pubr()
+
 
 # elevation & length
 all_trails |>
