@@ -13,6 +13,9 @@ library(sf)
 library(tidyverse)
 library(ggrepel)
 library(ggmap)
+# library(grid)
+library(shinybrowser)
+library(shinyjs)
 
 # table
 library(DT)
@@ -20,6 +23,16 @@ library(DT)
 # map colors
 rec_color = '#05bbaa'     #teal
 nonrec_color = '#FB836F'  #salmon
+
+shinyjscode = "
+shinyjs.init = function() {
+  $(window).resize(shinyjs.calcWidth);
+}
+shinyjs.calcWidth = function() { 
+  Shiny.onInputChange('plotWidth', $(window).width());
+}
+"
+
 
 Calc_Distance = function(lon, lat) {
   return(distm(matrix(c(lat, lon), ncol = 2))[2,1])
@@ -75,43 +88,60 @@ Get_Basemap = function(df, box_zoom, map_zoom) {
   return(basemap)
 }
 
-Plot_Map = function(df, basemap, fname){ 
-  map = ggmap(basemap) +
+Plot_Map = function(df, basemap){ 
+  
+  # suppresses coordinate system message
+  map = suppressMessages(
+    ggmap(basemap) +
     geom_sf(data = df |> filter(!rec),
-            color = nonrec_color, size = 3,
-            inherit.aes = FALSE) + 
+            color = nonrec_color, size = 5,
+            inherit.aes = FALSE
+            ) +
     geom_sf(data = df |> filter(rec),
             color = rec_color, size = 5,
-            inherit.aes = FALSE) + 
+            inherit.aes = FALSE
+            ) +
     geom_sf(data = df |> filter(rec),
             shape = 1, color = 'black', size = 5.5,
-            inherit.aes = FALSE) + 
-    geom_label_repel(data = df |> filter(rec),
-                     aes(label = name, x = long, y = lat),
-                     color = 'white',  fill = rec_color, 
-                     size = 4, fontface = "bold",
-                     inherit.aes = FALSE) +
-    theme_void()
-  
+            inherit.aes = FALSE) +
+    theme_void() + 
+    theme(aspect.ratio = 1)
+    )
   return(map)
 }
 
+
+set_shiny_plot_height_with_respects_to_width = function(session, output_width_name){
+  width <- function() { 
+    session$clientData[[output_width_name]] 
+  }
+  # Do something with the width
+  width / 2
+}
+
+
+
+# ui ------------------------------------------------------------------------------------------
 ui = fluidPage(
-  # tags$head(tags$style(HTML("div#inline label { width: 32%; }
-  #                              div#inline input { display: inline-block; width: 68%;}"))),
-  # tags$head(
-  #   tags$style(type="text/css", "#inline label{ display: table-cell; text-align: left; vertical-align: middle; }
-  #                                  #inline .form-group { display: table-row;}")),
+    shinyjs::useShinyjs(),
+    shinyjs::extendShinyjs(text = shinyjscode, functions = c('calcWidth')),
     fluidRow(
       column(6, offset = 3,
              align = 'center',
-             style = glue("background-color:{rec_color}"),
-             h1("Hike Recommender")
+             style = glue('font-family: Cooper Black; background-color:{rec_color}'),
+             h1("Take-a-Hike™️")
             )
     ),
     fluidRow(
       column(6, offset = 3,
+             style = glue('font-family: Cooper Black; background-color:{rec_color}'),
              fluidRow(
+               column(6, align = 'left',
+                      textInput("starting_location",
+                                "Enter a starting location",
+                                value = '',
+                                width = '100%')
+               ), 
                column(6,
                       sliderInput("difficulty_choices",
                                   "Hike Difficulty",
@@ -121,18 +151,13 @@ ui = fluidPage(
                                   value = 5,
                                   ticks = FALSE,
                                   width = '100%')
-                      ),
-               column(2, ''),
-               column(4, align = 'right',
-                      textInput("starting_location",
-                                "Enter a starting location",
-                                value = '',
-                                width = '100%')
-                      )
+               )
              )
-      )),
+           )
+    ),
     fluidRow(
       column(6, offset = 3,
+             style = glue('font-family: Cooper Black; background-color:{rec_color}'),
              fluidRow(
                column(6,
                       sliderInput("max_distance",
@@ -143,7 +168,7 @@ ui = fluidPage(
                                   width = '100%',
                                   ticks = FALSE)
                ),
-               column(6, align = 'right',
+               column(6,
                       sliderInput("max_duration",
                                   "Hike Duration (min): ",
                                   min = 10,
@@ -157,6 +182,7 @@ ui = fluidPage(
     ),
     fluidRow(
       column(6, offset = 3,
+             style = glue('font-family: Cooper Black; background-color:{rec_color}'),
              fluidRow(
                column(6,
                       sliderInput("max_length",
@@ -167,40 +193,51 @@ ui = fluidPage(
                                   width = '100%',
                                   ticks = FALSE)
                ),
-               column(6, align = 'right',
+               column(6,
                       sliderInput("max_elevation",
-                                  "Elevation gain (ft): ",
+                                  "Elevation Gain (ft): ",
                                   min = 1,
                                   max = 10000,
                                   value = 2000,
                                   width = '100%', 
                                   ticks = FALSE)
-                      )
+                    )
                )
-             )
+           )
   ),
-  # main panel
+
+# plots ---------------------------------------------------------------------------------------
   fluidRow(
     column(10, offset = 1,
            fluidRow(
-             column(5, align = 'center',
+             column(6, align = 'left',
                     style = glue("background-color:{nonrec_color}"),
                     uiOutput('all_trail_hover_info')
-             )),
+             ),
+             # column(2, ''),
+             column(6, align = 'left',
+                    style = glue("background-color:{rec_color}"),
+                    uiOutput('city_map_hover_info')
+                    )
+           ),
            fluidRow(
-            column(5, align = 'left',
+            column(6, align = 'left',
                    style = glue("background-color:{rec_color}"),
                    plotOutput("all_trail_map",
+                              # width = 'auto',
                               hover = hoverOpts("all_trail_hover", delay = 50, delayType = "debounce")
-                              ),
-                   ),
-            column(2, ''),
-            column(5,
+                             )
+            ), 
+            column(6,
                    style = glue("background-color:{nonrec_color}"),
-                   plotOutput("city_map")
+                   plotOutput("city_map",
+                              # width = '100%',
+                              hover = hoverOpts("city_map_hover", delay = 50, delayType = "debounce")
+                   )
                    )
            )
-  )),
+           )
+    ),
     fluidRow(
       column(10, offset = 1,
              style = glue("background-color:{nonrec_color}"),
@@ -230,6 +267,11 @@ server = function(input, output) {
     
     all_trails_selection = reactive({
       Select_Clusters(all_trails(), input$max_distance, input$max_length, input$max_elevation, input$max_distance)
+    })
+    
+    
+    plotWidth = reactive({ 
+      ifelse(is.null(input$plotWidth), 0, input$plotWidths)
     })
     
     # have this just show all trails with highlighted values + size for selections
@@ -264,18 +306,29 @@ server = function(input, output) {
                                  high = 'gray95') +
           theme_void() + 
           theme(plot.background = element_rect(fill = 'gray90')) +
-          theme(legend.position = 'none')
+          theme(legend.position = 'none') +
+          theme(aspect.ratio = 1)        
         
-          all_trails_plot
+        all_trails_plot
         
-      }
-    })
+          # grob = ggplotGrob(all_trails_plot)
+          # grob$respect = FALSE
+          # grid.newpage()
+          # grid.draw(grob)
+          }
+    },
+    # width = plotWidth() * (10/12) * 0.5
+    # width = plotWidth
+    width = 500
+    )
     
     output$all_trail_hover_info = renderText({
       if (nrow(all_trails_selection()) > 0) { 
           
         hover = input$all_trail_hover
-        point = nearPoints(all_trails_selection(), hover, threshold = 5, maxpoints = 1, addDist = TRUE)
+        point = nearPoints(all_trails_selection() |>
+                             mutate(name = str_trunc(name, 60)),
+                           hover, threshold = 5, maxpoints = 1, addDist = TRUE)
         placeholder = HTML(paste0(rep('<br/>', times = 2), sep = ''))
                            
         if (nrow(point) == 0) {
@@ -294,54 +347,66 @@ server = function(input, output) {
     output$city_map = renderPlot({
       if (nrow(all_trails_selection()) > 0) {
       
-        all_trails_combined = all_trails() |> 
+        all_trails_out = all_trails() |> 
           left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
           mutate(rec = !is.na(ID.y)) |> 
           rename(ID = ID.x) |> 
-          select(-ID.y)
+          select(-ID.y) |> 
+          group_by(distance_cluster) |> 
+          tidyr::fill(cluster_rank, .direction = 'updown') |>
+          ungroup() |> 
+          filter(cluster_rank == min(cluster_rank, na.rm = TRUE))
         
-        best_cluster = all_trails_combined |>
-          filter(cluster_rank == min(cluster_rank, na.rm = TRUE)) |> 
-          pull(distance_cluster)
-        
-        # TODO: pls refactor
-        all_trails_out = all_trails_combined |> 
-          filter(distance_cluster == best_cluster) |> 
-          st_as_sf(coords = c('long', 'lat'), crs = 4326, remove = FALSE)
-          
         city_basemap = Get_Basemap(all_trails_out,
-                                   box_zoom = 3, 
-                                   map_zoom = 10)
+                                   box_zoom = 1.5, 
+                                   map_zoom = 11)
         
-        city_detail = Plot_Map(all_trails_out, city_basemap, 'trail')
-        city_detail
+        map = Plot_Map(all_trails_out |> st_as_sf(coords = c('long', 'lat'), crs = 4326),
+                 city_basemap)
         
+        map
+        
+        # grob = ggplotGrob(map)
+        # grob$respect = FALSE
+        # grid.newpage()
+        # grid.draw(grob)        
       }
-    })
-    
-    output$trail_map = renderPlot({
+    },
+    # width = plotWidth() * (10/12) * 0.5
+    # width = plotWidth
+    width = 500
+    )
+
+    output$city_map_hover_info = renderText({
       if (nrow(all_trails_selection()) > 0) { 
         
-      all_trails_combined = all_trails() |> 
-        left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
-        mutate(rec = !is.na(ID.y))
-      
-      best_cluster = all_trails_combined |> filter(cluster_rank == min(cluster_rank, na.rm = TRUE)) |> pull(distance_cluster)
-      
-      # TODO: pls refactor
-      all_trails_out = all_trails_combined |> 
-        filter(distance_cluster == best_cluster) |> 
-        st_as_sf(coords = c('long', 'lat'), crs = 4326, remove = FALSE)
-      
-      trail_basemap = Get_Basemap(all_trails_out,
-                                  box_zoom = 0.5, 
-                                  map_zoom = 14)
-      
-      trail_detail = Plot_Map(all_trails_out, trail_basemap, 'trail')
-      trail_detail
+        hover2 = input$city_map_hover
+        point = nearPoints(all_trails() |> 
+                             left_join(all_trails_selection() |> select(ID, cluster_rank), by = 'ID', keep = TRUE) |> 
+                             mutate(rec = !is.na(ID.y)) |> 
+                             rename(ID = ID.x) |> 
+                             select(-ID.y) |> 
+                             group_by(distance_cluster) |> 
+                             tidyr::fill(cluster_rank, .direction = 'updown') |>
+                             ungroup() |> 
+                             filter(cluster_rank == min(cluster_rank, na.rm = TRUE)) |> 
+                             rename(lon = long) |>
+                             mutate(name = str_trunc(name, 60)) |> 
+                             st_as_sf(coords = c('lon', 'lat'), crs = 4326, remove = FALSE),
+                           hover2, threshold = 5, maxpoints = 1, addDist = TRUE)
+        placeholder = HTML(paste0(rep('<br/>', times = 2), sep = ''))
+        
+        if (nrow(point) == 0) {
+          placeholder
+        } else {
+          HTML(paste0("<b> ", point$name, "</b>", "<br/>",
+                      "<b>",  round(point$length, 2), " mi </b>️" ,emo::ji('right_arrow'),
+                      " <b>", round(point$elevation_gain, 0), " ft </b>️", emo::ji('up_arrow'),
+                      " <b>", round(point$avg_grade, 2), "% </b>", emo::ji('up_right_arrow')))
+        }
       }
     })
-    
+  
     output$cluster_table = renderDataTable({
       if (nrow(all_trails_selection()) > 0) { 
         
@@ -351,27 +416,19 @@ server = function(input, output) {
           mutate(location = HTML(str_c(city_name, ',<br/>', state_name))) |> 
           ungroup() |> 
           select(-city_name, -state_name) |> 
-          # select(-ID, -lat, -long, -name, -cluster_rank) |>
           rename(difficulty = difficulty_rating,
                  `hike time` = duration_minutes) |> 
           relocate(location, .after = 'link')
-        # mutate(across(c(home_distance:cluster_weight), ~round(., 2)))
-        
+
         DT::datatable(tbl, escape = FALSE,
                       options = list(
                         autoWidth = TRUE
-                        # scrollX = TRUE,
-                        # columnDefs = list(
-                        #   list(width = '50px', targets = c(2)),
-                        #   list(width = '100px', targets = c(6)),
-                        #   list(width = '50px', targets = c(3:5))
-                        #   )
                         )
                       )
         }
     })
 }
-
+# 
 # input = list(max_distance = 150,
 #              max_length = 7.5,
 #              max_elevation = 2000,
